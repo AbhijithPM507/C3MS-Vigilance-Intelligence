@@ -31,10 +31,14 @@ graph TD
     P --> Q[Processed Complaint]
     Q --> R[Streamlit Dashboard<br/>KPIs & Analytics]
     Q -.->|High Risk| S[Telegram Admin Alert]
+    B --> T[Redis/Celery Queue]
+    T --> U[Background Worker]
+    U --> Q
 ```
 
 ## 🧩 Modules
-- **Telegram Interface (`interface_layer/app.py`):** FastAPI + `python-telegram-bot` webhook-driven ingestion point.
+- **Telegram Interface (`interface_layer/app.py`):** FastAPI + `python-telegram-bot` webhook-driven ingestion point that stages uploads, persists a pending record, and publishes processing tasks to Redis.
+- **Background Worker (`backend/tasks.py`):** Celery task runner that performs LangGraph analysis, updates complaint status, and sends the final Telegram notification.
 - **Data Processor (`data_layer/`):**
   - `pii_redactor`: Masks PII from complaints using NLP (`spaCy`) to ensure user privacy.
   - `blockchain`: Computes cryptographic block hashes for complaint texts, enforcing data integrity.
@@ -84,20 +88,35 @@ Create a `.env` file in the root directory and map your configuration keys:
 TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
 ADMIN_CHAT_ID="your_telegram_chat_id"
 PINECONE_API_KEY="your_pinecone_api_key_here"
+PINECONE_INDEX="your_pinecone_index_name"
+CELERY_BROKER_URL="redis://localhost:6379/0"
+CELERY_RESULT_BACKEND="redis://localhost:6379/0"
 ```
 
 ### 4. Running the Application
-Because of the decoupled nature, you will run the interface API and dashboard independently:
+Because of the decoupled nature, you will run the API, Celery worker, and dashboard independently.
 
-**Terminal 1 — Start the Backend API:**
+**Terminal 1 — Start Redis:**
+Run Redis locally so Celery can queue tasks. If Redis is installed:
+```bash
+redis-server
+```
+
+**Terminal 2 — Start the Celery Worker:**
+Run the background worker that processes complaints asynchronously:
+```bash
+celery -A backend.celery_app worker --loglevel=info
+```
+
+**Terminal 3 — Start the Backend API:**
 Start the FastAPI server which manages Telegram Bot webhooks:
 ```bash
 uvicorn interface_layer.app:app --reload
 ```
 
-**Terminal 2 — Start the Dashboard:**
+**Terminal 4 — Start the Dashboard:**
 Start the Streamlit Monitoring Dashboard:
 ```bash
 streamlit run dashboard/app.py
 ```
-> **Note:** The Streamlit dashboard interacts securely with the FastAPI `/complaints` endpoint internally. Ensure the backend is running first.
+> **Note:** The Telegram webhook now stages uploads, enqueues a Celery task, and returns `HTTP 200` immediately. The final complaint analysis and user notification are handled by the background worker.

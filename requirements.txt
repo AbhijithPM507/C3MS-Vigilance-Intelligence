@@ -39,3 +39,6 @@ python-dotenv
 # Utilities
 numpy
 requests
+celery
+redis
+psycopg2-binary

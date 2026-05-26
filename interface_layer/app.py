@@ -1,3 +1,7 @@
+import os
+import uuid
+from datetime import datetime
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from telegram import Bot, Update, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -9,13 +13,10 @@ from telegram.ext import (
 )
 
 from data_layer.storage.database import init_db
-from data_layer.storage.database import save_complaint
-from data_layer.storage.database import get_complaint_by_id
+from data_layer.storage.database import save_pending_complaint
+from data_layer.storage.database import get_complaint_by_id, get_all_complaints as get_all_complaints_db
 
-import os
-from dotenv import load_dotenv
-
-from backend.logic.service import process_complaint
+from backend.tasks import process_complaint_task
 from preprocessing.media_pipeline import extract_text_from_media
 
 
@@ -33,7 +34,7 @@ app = FastAPI()
 @app.on_event("startup")
 def startup():
     init_db()
-    os.makedirs("uploads", exist_ok=True)
+    os.makedirs("uploads/pending", exist_ok=True)
 
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -141,6 +142,9 @@ Integrity Verified: ✅
 def handle_input(update, context):
     selected_format = context.user_data.get("format")
     extracted_text = None
+    staged_file_path = None
+    complaint_id = str(uuid.uuid4())
+    chat_id = update.effective_chat.id
 
     # TEXT INPUT
     if selected_format == "Text" and update.message.text:
@@ -149,91 +153,85 @@ def handle_input(update, context):
     # IMAGE INPUT
     elif selected_format == "Image" and update.message.photo:
         file = update.message.photo[-1].get_file()
-        file_path = f"uploads/{update.message.message_id}.jpg"
-        file.download(file_path)
+        staged_file_path = f"uploads/pending/{complaint_id}.jpg"
 
         try:
-            extracted_text = extract_text_from_media(file_path)
+            file.download(staged_file_path)
         except Exception as e:
-            print("OCR Error:", e)
-            update.message.reply_text("Could not process the image.")
+            print("OCR staging download error:", e)
+            update.message.reply_text("Could not stage the image for processing.")
             return ConversationHandler.END
 
     # PDF INPUT
     elif selected_format == "PDF" and update.message.document:
         file = update.message.document.get_file()
-        file_path = f"uploads/{update.message.document.file_name}"
-        file.download(file_path)
+        staged_file_path = f"uploads/pending/{complaint_id}.pdf"
 
         try:
-            extracted_text = extract_text_from_media(file_path)
+            file.download(staged_file_path)
         except Exception as e:
-            print("PDF Error:", e)
-            update.message.reply_text("Could not process the PDF.")
+            print("PDF staging download error:", e)
+            update.message.reply_text("Could not stage the PDF for processing.")
             return ConversationHandler.END
 
     # VOICE INPUT
     elif selected_format == "Voice" and update.message.voice:
         file = update.message.voice.get_file()
-        file_path = f"uploads/{update.message.message_id}.ogg"
-        file.download(file_path)
+        staged_file_path = f"uploads/pending/{complaint_id}.ogg"
 
         try:
-            extracted_text = extract_text_from_media(file_path)
+            file.download(staged_file_path)
         except Exception as e:
-            print("Audio Transcription Error:", e)
-            update.message.reply_text("Could not process the voice message.")
+            print("Audio staging download error:", e)
+            update.message.reply_text("Could not stage the voice message for processing.")
             return ConversationHandler.END
 
     else:
         update.message.reply_text("Invalid format. Please restart using /start.")
         return ConversationHandler.END
 
-    # -----------------------------
-    # BASIC VALIDATION
-    # -----------------------------
-    if not extracted_text or len(extracted_text.strip()) < 15:
+    if selected_format == "Text":
+        if not extracted_text or len(extracted_text.strip()) < 15:
+            update.message.reply_text(
+                "Complaint details are insufficient. Please provide more information."
+            )
+            return ConversationHandler.END
+
+    elif not staged_file_path:
         update.message.reply_text(
-            "Complaint details are insufficient. Please provide more information."
+            "Could not stage your upload. Please restart using /start and try again."
         )
         return ConversationHandler.END
 
-    update.message.reply_text("Processing your complaint...")
+    pending_record = {
+        "id": complaint_id,
+        "official_name": None,
+        "position": None,
+        "place": None,
+        "description": None,
+        "category": None,
+        "risk_level": None,
+        "severity_score": None,
+        "timestamp": datetime.utcnow().isoformat(),
+        "integrity_hash": None,
+        "evidence_hash": None,
+        "escalation_required": False,
+        "escalation_timestamp": None,
+        "status": "Pending",
+        "chat_id": str(chat_id),
+        "input_format": selected_format,
+        "staged_file_path": staged_file_path,
+        "original_text": extracted_text,
+    }
 
-    # -----------------------------
-    # PROCESS COMPLAINT
-    # -----------------------------
-    result = process_complaint(extracted_text)
+    save_pending_complaint(pending_record)
+    process_complaint_task.delay(complaint_id)
 
-    save_complaint(result)
-
-    # -----------------------------
-    # ESCALATION ALERT
-    # -----------------------------
-    if result["risk_level"] == "High" and ADMIN_CHAT_ID:
-        bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=f"""
-🚨 HIGH RISK CORRUPTION ALERT
-
-ID: {result['complaint_id']}
-Category: {result['category']}
-Risk: {result['risk_level']}
-
-Immediate review recommended.
-"""
-        )
-
-    # -----------------------------
-    # FINAL RESPONSE
-    # -----------------------------
     reply = f"""
-✅ Complaint Registered
+✅ Complaint queued successfully.
 
-ID: {result['complaint_id']}
-Category: {result['category']}
-Risk Level: {result['risk_level']}
-Integrity: {result['integrity_status']}
+ID: {complaint_id}
+Your report is being processed in the background. You will receive a notification once the analysis is complete.
 """
 
     update.message.reply_text(reply)
@@ -261,22 +259,10 @@ conv_handler = ConversationHandler(
 dispatcher.add_handler(conv_handler)
 dispatcher.add_handler(CommandHandler("track", track_command))
 
-from data_layer.storage.database import DB_PATH
-import sqlite3
-
-
 @app.get("/complaints")
-def get_all_complaints():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+def list_complaints():
+    return get_all_complaints_db()
 
-    cursor.execute("SELECT * FROM complaints")
-    rows = cursor.fetchall()
-
-    conn.close()
-
-    return [dict(row) for row in rows]
 # -----------------------------
 # TELEGRAM WEBHOOK
 # -----------------------------
