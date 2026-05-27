@@ -10,3 +10,6 @@ class ComplaintState(TypedDict):
     relevant_laws: List[str]
     escalation_required: bool
     structured_output: Dict
+    retrieval_attempts: int
+    search_queries: List[str]
+    validation_decision: str

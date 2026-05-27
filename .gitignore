@@ -37,3 +37,14 @@ Thumbs.db
 .huggingface/
 
 /legal_docs
+
+# Blockchain anchor log (local JSON fallback)
+anchor_log.json
+
+# SQLite fallback database
+complaints.db
+
+# Solidity compilation artifacts (if any)
+out/
+artifacts/
+node_modules/

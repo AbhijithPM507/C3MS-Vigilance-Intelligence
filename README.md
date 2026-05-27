@@ -1,12 +1,12 @@
 <div align="center">
   <h1>🛡️ C3MS - Anti-Corruption Monitoring Dashboard</h1>
-  <p><strong>An advanced, AI-driven, multi-modal anti-corruption reporting platform with blockchain integrity.</strong></p>
+  <p><strong>An advanced, AI-driven, multi-modal anti-corruption reporting platform with on-chain blockchain integrity and agentic RAG.</strong></p>
 </div>
 
 ---
 
 ## 📖 Overview
-**C3MS (Kerala Corruption Reporting Bot)** is a sophisticated complaint management system designed to track, mitigate, and analyze corruption cases securely. By integrating multi-modal data intake (Text, Voice, PDF, Images) via a Telegram Bot, analyzing complaints using Agentic AI (LangGraph & LLaMA 3), and guaranteeing data tamper-proofing through Blockchain Integrity algorithms, C3MS ensures robust, fair, and secure issue resolution.
+**C3MS (Kerala Corruption Reporting Bot)** is a sophisticated complaint management system designed to track, mitigate, and analyze corruption cases securely. It integrates multi-modal data intake (Text, Voice, PDF, Images) via a Telegram Bot, analyzes complaints using an **Agentic AI loop** (LangGraph & LLaMA 3 with self-critiquing retrieval), and guarantees data tamper-proofing by anchoring integrity hashes to a **public EVM testnet** via a minimal Solidity smart contract.
 
 ## 🏗️ Architecture
 The system follows a highly modular, decoupled microservices-inspired architecture:
@@ -21,19 +21,23 @@ graph TD
     D & E & F -.-> G[Normalized Text]
     G --> H[Data Layer]
     H --> I[PII Redactor<br/>spaCy NLP]
-    I --> J[Blockchain Integrity<br/>Tamper-proofing]
+    I --> J[Blockchain Integrity<br/>SHA-256 Chain]
     J --> K[(Pinecone Vector DB<br/>Legal Context Retrieval)]
+    J --> L2[On-Chain Anchor<br/>EVM Testnet]
     K --> L[LangGraph AI Logic]
     L --> M[Categorization Node]
-    L --> N[Risk Analysis Node]
-    L --> O[Escalation Node]
-    M & N & O --> P[LLaMA 3 Model]
-    P --> Q[Processed Complaint]
-    Q --> R[Streamlit Dashboard<br/>KPIs & Analytics]
-    Q -.->|High Risk| S[Telegram Admin Alert]
-    B --> T[Redis/Celery Queue]
-    T --> U[Background Worker]
-    U --> Q
+    M --> N[Retrieval Node]
+    N --> O[Validation Node<br/>Self-Critique]
+    O -.->|Context Bad,<br/>&lt;3 attempts| N
+    O --> P[Risk Analysis Node]
+    P --> Q[Escalation Node]
+    M & N & O & P & Q --> R[LLaMA 3 Model]
+    R --> S[Processed Complaint]
+    S --> T[Streamlit Dashboard<br/>KPIs & Analytics]
+    S -.->|High Risk| U[Telegram Admin Alert]
+    B --> V[Redis/Celery Queue]
+    V --> W[Background Worker]
+    W --> S
 ```
 
 ## 🧩 Modules
@@ -41,9 +45,9 @@ graph TD
 - **Background Worker (`backend/tasks.py`):** Celery task runner that performs LangGraph analysis, updates complaint status, and sends the final Telegram notification.
 - **Data Processor (`data_layer/`):**
   - `pii_redactor`: Masks PII from complaints using NLP (`spaCy`) to ensure user privacy.
-  - `blockchain`: Computes cryptographic block hashes for complaint texts, enforcing data integrity.
+  - `blockchain`: Computes cryptographic SHA-256 block hashes for complaint texts; anchors every N blocks to a **public EVM testnet** via a Solidity `HashAnchor` contract (`web3.py`), with local JSON fallback. Uses `ThreadPoolExecutor` with hard timeout so slow RPC never blocks Celery workers.
   - `vector_db`: Interacts with **Pinecone** to seamlessly augment AI with state laws and regulations (Retrieval-Augmented Generation).
-- **AI Backend (`backend/logic/`):** Implements a **LangGraph StateGraph** pipeline containing conditional edges to categorize, process, and optionally escalate high-risk complaints.
+- **AI Backend (`backend/logic/`):** Implements a **LangGraph StateGraph** pipeline with an **agentic RAG loop** — after retrieval, a `Validation Node` LLM-critiques the legal context against the complaint category. If insufficient, it generates an improved search query and loops back (max 3 attempts). Falls through to analysis when context is good or attempts are exhausted.
 - **Preprocessing (`preprocessing/`):** Media intelligence layer extending parsing to Images, PDFs, and Voice Messages.
 - **Monitoring Dashboard (`dashboard/app.py`):** Real-time analytics, Live Feed UI, and KPIs powered by **Streamlit** and **Plotly**.
 
@@ -52,10 +56,11 @@ C3MS relies on cutting-edge local AI usage tailored to privacy and robustness:
 - **Local Large Language Models (LLMs):** Powered by **Ollama (LLaMA 3)** running locally via `llm_wrapper.py` to ensure complete privacy, zero data leakage, and high-quality NLP inferences.
 - **Agentic Workflows (LangGraph):** Synthesizes AI tasks through dedicated nodes:
   - `Categorization Node`: Determines the nature of the corruption.
-  - `Retrieval Node`: Consults the vector database for related laws.
+  - `Retrieval Node`: Consults the vector database for related laws using the complaint text or an LLM-generated refined query.
+  - `Validation Node`: Self-critique node that LLM-judges whether the retrieved legal context is sufficient. If not, generates an improved search query and signals a re-retrieval loop (up to 3 attempts).
   - `Risk Analysis Node`: Diagnoses the severity of the submission and flags for escalation.
   - `Escalation Node`: Evaluates conditional bounds and notifies administrators directly inside Telegram.
-- **Retrieval-Augmented Generation (RAG):** Employs `sentence-transformers` and **Pinecone** to anchor LLM responses firmly in actual regulations, reducing hallucination bounds.
+- **Retrieval-Augmented Generation (RAG):** Employs `sentence-transformers` and **Pinecone** to anchor LLM responses firmly in actual regulations, reducing hallucination bounds. The **agentic loop** (Validation Node → re-Retrieve) ensures legal context quality before analysis.
 - **NLP Entity Masking (`spaCy`):** Detects and anonymizes Names, Locations, and Organizations dynamically.
 
 ## ⚙️ Setup & Requirements
@@ -65,6 +70,7 @@ C3MS relies on cutting-edge local AI usage tailored to privacy and robustness:
 - **[Ollama](https://ollama.com/)** running locally with the `llama3` model. Make sure to pull it: `ollama run llama3`
 - **Pinecone** Account & API Key
 - **Telegram Bot Token** (obtain from BotFather)
+- **(Optional) Web3 Anchoring:** `web3` Python package (`pip install web3`) and a deployed `HashAnchor` contract on an EVM testnet. Use [Remix](https://remix.ethereum.org/) or Hardhat to compile and deploy `data_layer/blockchain/AnchorContract.sol`.
 
 ### 1. Clone the repository
 ```bash
@@ -85,12 +91,23 @@ python -m spacy download en_core_web_sm
 ### 3. Environment Variables
 Create a `.env` file in the root directory and map your configuration keys:
 ```env
+# Telegram
 TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
 ADMIN_CHAT_ID="your_telegram_chat_id"
+
+# Pinecone Vector DB
 PINECONE_API_KEY="your_pinecone_api_key_here"
 PINECONE_INDEX="your_pinecone_index_name"
+
+# Celery / Redis
 CELERY_BROKER_URL="redis://localhost:6379/0"
 CELERY_RESULT_BACKEND="redis://localhost:6379/0"
+
+# Web3 On-Chain Anchoring (optional — falls back to local JSON if unset)
+WEB3_RPC_URL="https://sepolia.infura.io/v3/YOUR_PROJECT_ID"
+WEB3_PRIVATE_KEY="0x..."
+ANCHOR_CONTRACT_ADDRESS="0x..."
+WEB3_TX_TIMEOUT="30"
 ```
 
 ### 4. Running the Application
